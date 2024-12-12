@@ -21,6 +21,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     torchmetrics==0.10.3 \
     transformers \
     transformers-interpret \
+    typing_extensions==4.7.1 \
     xformers==0.0.18 
 
 RUN git config --global --add safe.directory /app

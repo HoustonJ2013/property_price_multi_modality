@@ -14,3 +14,7 @@ def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epoch
     schedule = np.concatenate((warmup_schedule, schedule))
     assert len(schedule) == epochs * niter_per_ep
     return schedule
+
+
+def process_address(b):
+    return ", ".join([_.strip(", ") for _ in b.split("    ") if len(_.strip(" ")) > 0])
