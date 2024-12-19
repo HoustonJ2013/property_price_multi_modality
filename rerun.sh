@@ -1,4 +1,7 @@
-python modeling/train.py --config_file=model_checkpoints/tabformer_t14e/config.cfg 
+# python modeling/train.py --config_file=model_checkpoints/tabformer_t30/config.cfg 
+# python modeling/train.py --config_file=model_checkpoints/tabformer_t32a/config.cfg
+python modeling/train.py --config_file=model_checkpoints/tabformer_t32c/config.cfg
+python modeling/train.py --config_file=model_checkpoints/tabformer_t32e/config.cfg
 # python modeling/train.py --config_file=model_checkpoints/tabformer_t14b/config.cfg
 # python modeling/train.py --config_file=model_checkpoints/tabformer_t14d/config.cfg
 # python modeling/train.py --config_file=model_checkpoints/tabformer_t13a/config.cfg 

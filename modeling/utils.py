@@ -1,4 +1,5 @@
-import numpy as np 
+import pandas as pd
+import numpy as np
 
 
 def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
@@ -273,8 +274,11 @@ def Foundation_multiclass_feature(content):
 def Garage_Types_multiclass_features(content):
     house_features = content["house_features"]
     if "Garage(s):" in house_features:
-        garage_str = house_features["Garage(s):"]
-        return [_.strip(" ,") for _ in garage_str.split("/")[1].split(",") if len(_.strip(" ,")) > 0]
+        try: 
+            garage_str = house_features["Garage(s):"]
+            return [_.strip(" ,") for _ in garage_str.split("/")[1].split(",") if len(_.strip(" ,")) > 0]
+        except:
+            return []
     else:
         return []
 
@@ -399,5 +403,46 @@ def finanace_option_multiclass(content):
         res = [_.strip(" ,_").lower() for _ in house_features["Financing Considered:"].split(",")]
         res = [rename_dict[_] if _ in rename_dict else _ for _ in res]
         return res
+    else:
+        return []
+
+
+def extract_high_school_name(school_dict_list):
+    if len(school_dict_list) == 0:
+        return "", "", np.nan, "", []
+    for school_dict_ in school_dict_list:
+        if "High School High" in school_dict_["school name"]:
+            return school_dict_["school name"].replace("High School High", "High School"), \
+                school_dict_["school grades"], school_dict_["school stars"], \
+                school_dict_["school rate"], school_dict_["school attributes"]
+    return "", "", np.nan, "", []
+
+
+def extract_mid_school_name(school_dict_list):
+    if len(school_dict_list) == 0:
+        return "", "", np.nan, "", []
+    for school_dict_ in school_dict_list:
+        if "Middle School Middle" in school_dict_["school name"]:
+            return school_dict_["school name"].replace("Middle School Middle", "Middle School"), \
+                school_dict_["school grades"], school_dict_["school stars"], \
+                school_dict_["school rate"], school_dict_["school attributes"]
+    return "", "", np.nan, "", []
+
+
+def extract_elemetary_school_name(school_dict_list):
+    if len(school_dict_list) == 0:
+        return "", "", np.nan, "", []
+    for school_dict_ in school_dict_list:
+        if "Elementary School Elementary" in school_dict_["school name"]:
+            return school_dict_["school name"].replace("Elementary School Elementary", "Elementary School"), \
+                school_dict_["school grades"], school_dict_["school stars"], \
+                school_dict_["school rate"], school_dict_["school attributes"]
+    return "", "", np.nan, "", []
+
+
+def school_org(content):
+    if "house_schools" in content:
+        house_schools = content["house_schools"]
+        return list(np.unique([_["school org"] for _ in house_schools if "school org" in _]))
     else:
         return []

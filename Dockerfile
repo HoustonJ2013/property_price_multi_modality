@@ -16,6 +16,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pre-commit \
     protobuf \ 
     pytorch_frame \ 
+    shap \ 
     sentencepiece \
     scipy \ 
     torchmetrics==0.10.3 \

@@ -134,6 +134,14 @@ def get_args_parser():
     parser.add_argument("--add_text_emb", 
                         action="store_true", 
                         help="add text embedding")
+    parser.add_argument("--text_emb_mean", 
+                        action="store_true", 
+                        help="use mean embedding")
+    parser.add_argument("--use_pool_text_emb", 
+                        action="store_true", 
+                        help="Whether to use pool text embedding")
+
+    
     parser.add_argument("--add_img_emb", 
                         action="store_true", 
                         help="add text embedding")
@@ -164,6 +172,12 @@ def get_args_parser():
         default=100,
         type=int,
         help="""num of epochs""",
+    )
+    parser.add_argument(
+        "--checkpoint_freq",
+        default=200,
+        type=int,
+        help="""The frequency to save the checkpoint""",
     )
     parser.add_argument(
         "--lr",
@@ -221,7 +235,7 @@ def train_one_epoch(model, optimizer, train_loader, loss_fn, epoch, n_batches, l
                 param_group["lr"] = lr_schedule[epoch * len(train_loader) + batch_i]
                 # print("current lr is %0.2e" % param_group["lr"])
         if args.gpu:
-            tf = tf.to(device)
+            tf = tf.to(device, non_blocking=True)
         optimizer.zero_grad()
         pred = model(tf)
         loss = loss_fn(pred, tf.y)
@@ -285,7 +299,14 @@ def train(args):
     add_numerial_features = ["elementary_school_star", "middle_school_star", "high_school_star"]
     add_cate_multi = ["school_org"] # ["school_names", "school_grades", "school_org"]
 
-    text_embedding_col = ["general_desc_emb"]
+    if args.text_emb_mean is True:
+        text_embedding_col = ["general_desc_roberta_mean_features"]
+        if args.use_pool_text_emb:
+            text_embedding_col = ["general_desc_roberta_mean_features", "pool_desc_roberta_mean_features"]
+    else: 
+        text_embedding_col = ["general_desc_roberta_cls_features"]
+        if args.use_pool_text_emb:
+            text_embedding_col = ["general_desc_roberta_cls_features", "pool_desc_roberta_cls_features"]
     img_embedding_col = ["img_emb"]
     raw_df = pd.read_pickle(args.data_path).reset_index(drop=True)
     raw_df["date"] = raw_df["date"].apply(lambda x: x.replace("_", "-"))
@@ -300,20 +321,23 @@ def train(args):
         dense_features = dense_features + add_numerial_features
         cate_multi = cate_multi + add_cate_multi
     
+    for feat in dense_features:
+        raw_df[feat] = raw_df[feat].fillna(raw_df[feat].mean())
+
     col_to_stype = {}
-    col_to_stype = {d: stype.numerical for d in dense_features}
+    col_to_stype.update({d: stype.numerical for d in dense_features})
     col_to_stype.update({d: stype.timestamp for d in time_col})
     col_to_stype.update({target: stype.numerical})
     col_to_stype.update({d: stype.categorical for d in cate})
     col_to_stype.update({d: stype.multicategorical for d in cate_multi})
     if args.add_text_emb and args.add_img_emb:
         text_emb_df = pd.read_pickle(args.text_emb_path)
-        raw_df = raw_df.join(text_emb_df.set_index("address")[["general_desc_emb"]], 
-                     on="address", 
+        raw_df = raw_df.join(text_emb_df.set_index("address_key")[text_embedding_col], 
+                     on="address_key", 
                      how="left")
         img_emb_df = pd.read_pickle(args.img_emb_path)
-        raw_df = raw_df.join(img_emb_df.set_index("address")[["img_emb"]], 
-                     on="address", 
+        raw_df = raw_df.join(img_emb_df.set_index("address_key")[["img_emb"]], 
+                     on="address_key", 
                      how="left")
         raw_df = raw_df[dense_features + cate + cate_multi + time_col + text_embedding_col + img_embedding_col + [target]]
         col_to_stype.update({d: stype.embedding for d in img_embedding_col + text_embedding_col})
@@ -322,8 +346,8 @@ def train(args):
     elif args.add_text_emb:
         print("adding text embedding")
         emb_df = pd.read_pickle(args.text_emb_path)
-        raw_df = raw_df.join(emb_df.set_index("address")[["general_desc_emb"]], 
-                     on="address", 
+        raw_df = raw_df.join(emb_df.set_index("address_key")[text_embedding_col], 
+                     on="address_key", 
                      how="left")
         raw_df = raw_df[dense_features + cate + cate_multi + time_col + text_embedding_col + [target]]
         col_to_stype.update({d: stype.embedding for d in text_embedding_col})
@@ -331,8 +355,8 @@ def train(args):
     elif args.add_img_emb:
         print("adding img embedding")
         emb_df = pd.read_pickle(args.img_emb_path)
-        raw_df = raw_df.join(emb_df.set_index("address")[["img_emb"]], 
-                     on="address", 
+        raw_df = raw_df.join(emb_df.set_index("address_key")[["img_emb"]], 
+                     on="address_key", 
                      how="left")
         raw_df = raw_df[dense_features + cate + cate_multi + time_col + img_embedding_col + [target]]
         col_to_stype.update({d: stype.embedding for d in img_embedding_col})
@@ -448,9 +472,16 @@ def train(args):
                                 "mean":  ["%0.2e"%(_) for _ in mean_stat.statistic],  
                                 # "bin_number": ["%i"%(_) for _ in mean_stat.binnumber]
                                 })
+        if epoch > 0 and epoch % args.checkpoint_freq == 0:
+            checkpoint_path = os.path.join(test_folder, "model_epoch_%03d.pth"%epoch)
+            state_dict_cpu = {k: v.cpu() for k, v in model.state_dict().items()}
+            model_dict = {"model_weight": state_dict_cpu}
+            torch.save(model_dict, checkpoint_path)
+
     # Save the final model checkpoint 
     checkpoint_path = os.path.join(test_folder, "final_model.pth")
-    model_dict = {"model_weight": model.state_dict()}
+    state_dict_cpu = {k: v.cpu() for k, v in model.state_dict().items()}
+    model_dict = {"model_weight": state_dict_cpu}
     torch.save(model_dict, checkpoint_path)
 
 
