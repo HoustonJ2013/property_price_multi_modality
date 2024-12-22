@@ -9,7 +9,7 @@ import random
 from tqdm import tqdm
 from pathlib import Path
 from scipy.stats import binned_statistic
-
+import pickle
 import torch
 
 import torch_frame
@@ -17,7 +17,14 @@ from torch_frame.data import Dataset
 from torch_frame.data import DataLoader
 from torch_frame import TensorFrame, stype
 from torch_frame.nn.models.ft_transformer import FTTransformer
-
+from torch_frame.nn.encoder import (
+    EmbeddingEncoder,
+    LinearEncoder,
+    LinearEmbeddingEncoder,
+    StypeWiseFeatureEncoder,
+    MultiCategoricalEmbeddingEncoder,
+    TimestampEncoder,
+)
 
 from model import TabTransformer, stype_encoder_dict_2, stype_encoder_dict_3
 from utils import cosine_scheduler
@@ -122,15 +129,35 @@ def get_args_parser():
          "--cache_path",
         default="data/property_structured_multiclass_emptylist.pt",
         type=str,
-        help="""The path to the Raw Table in Pickle Format""",
+        help="""The path to cached tensor frame""",
     )
-
+    parser.add_argument('--dense_features', nargs='+', default=["LON", 
+                    "LAT", 
+                    "building_sqft", 
+                    "Lot Size", 
+                    "Year Built", 
+                    "Garage Number", 
+                    "Bedrooms", 
+                    "Baths", 
+                    "Maintenance Fee", 
+                    "Tax Rate", 
+                    "Recent Market Value", 
+                    "Recent Tax Value", 
+                    "elementary_school_star", 
+                    "middle_school_star", 
+                    "high_school_star"])
+    parser.add_argument('--cate', nargs='+', 
+                        default=["status", "Property Type", "County", "Private Pool", "Area Pool"])
+    parser.add_argument('--cate_multi', nargs='+', 
+                        default=["Foundation_multiclass", "Garage Types_multiclass", 
+                "Roof Type_multiclass", "Pool_feature_multiclass", "floor_type_multiclass", 
+                "finance_option_multiclass", "Exterior Type_multiclass", "Style_multiclass", 
+                "school_org"])
+    parser.add_argument('--time_col', nargs='+', 
+                        default=["date"])
     parser.add_argument("--data_v2", 
                         action="store_true", 
                         help="use data prep version 2")
-    parser.add_argument("--additional_feature_v1", 
-                        action="store_true", 
-                        help="Add addiontal school related features")
     parser.add_argument("--add_text_emb", 
                         action="store_true", 
                         help="add text embedding")
@@ -278,27 +305,27 @@ def eval_model(model, val_loader, epoch, args, return_pred=False):
 def train(args):
     # load data
     target = "price"
-    dense_features = ["LON", 
-                    "LAT", 
-                    "building_sqft", 
-                    "Lot Size", 
-                    "Year Built", 
-                    "Garage Number", 
-                    "Bedrooms", 
-                    "Baths", 
-                    "Maintenance Fee", 
-                    "Tax Rate", 
-                    "Recent Market Value", 
-                    "Recent Tax Value"]
-    cate = ["status", "Property Type", "County", "Private Pool", "Area Pool"]
-    time_col = ["date"]
-    cate_multi = ["Foundation_multiclass", "Garage Types_multiclass", 
-                "Roof Type_multiclass", "Pool_feature_multiclass", "floor_type_multiclass", 
-                "finance_option_multiclass", "Exterior Type_multiclass", "Style_multiclass"]
-    
-    add_numerial_features = ["elementary_school_star", "middle_school_star", "high_school_star"]
-    add_cate_multi = ["school_org"] # ["school_names", "school_grades", "school_org"]
+    dense_features = args.dense_features
+    cate = args.cate
+    time_col = args.time_col
+    cate_multi = args.cate_multi
+    stype_encoder_dict = {}
+    if len(dense_features) > 0: 
+        stype_encoder_dict.update({stype.numerical: LinearEncoder()})
 
+    if len(cate) > 0: 
+        stype_encoder_dict.update({stype.categorical: EmbeddingEncoder()})
+    
+    if len(time_col) > 0:
+        stype_encoder_dict.update({stype.timestamp: TimestampEncoder()})
+
+    if len(cate_multi) > 0:
+        stype_encoder_dict.update({stype.multicategorical: MultiCategoricalEmbeddingEncoder()})
+
+    if args.add_text_emb or args.add_img_emb:
+        stype_encoder_dict.update({stype.embedding: LinearEmbeddingEncoder()})
+
+    # complicated logic to handle text embedding test, the mean feature is found to be the best
     if args.text_emb_mean is True:
         text_embedding_col = ["general_desc_roberta_mean_features"]
         if args.use_pool_text_emb:
@@ -307,6 +334,7 @@ def train(args):
         text_embedding_col = ["general_desc_roberta_cls_features"]
         if args.use_pool_text_emb:
             text_embedding_col = ["general_desc_roberta_cls_features", "pool_desc_roberta_cls_features"]
+    
     img_embedding_col = ["img_emb"]
     raw_df = pd.read_pickle(args.data_path).reset_index(drop=True)
     raw_df["date"] = raw_df["date"].apply(lambda x: x.replace("_", "-"))
@@ -316,13 +344,11 @@ def train(args):
         raw_df["Year Built"] = raw_df.apply(lambda x: int(x["date"].split("-")[0]) - x["Year Built"] 
                                             if x["date"] is not None and x["Year Built"] is not None else None,
                                             axis=1)
-    if args.additional_feature_v1:
-        print("adding additional features")
-        dense_features = dense_features + add_numerial_features
-        cate_multi = cate_multi + add_cate_multi
-    
     for feat in dense_features:
         raw_df[feat] = raw_df[feat].fillna(raw_df[feat].mean())
+
+    for col in cate_multi:
+        raw_df[col] = raw_df[col].apply(lambda d: d if isinstance(d, list) else [])
 
     col_to_stype = {}
     col_to_stype.update({d: stype.numerical for d in dense_features})
@@ -341,7 +367,6 @@ def train(args):
                      how="left")
         raw_df = raw_df[dense_features + cate + cate_multi + time_col + text_embedding_col + img_embedding_col + [target]]
         col_to_stype.update({d: stype.embedding for d in img_embedding_col + text_embedding_col})
-        stype_encoder_dict = stype_encoder_dict_3
         
     elif args.add_text_emb:
         print("adding text embedding")
@@ -351,7 +376,6 @@ def train(args):
                      how="left")
         raw_df = raw_df[dense_features + cate + cate_multi + time_col + text_embedding_col + [target]]
         col_to_stype.update({d: stype.embedding for d in text_embedding_col})
-        stype_encoder_dict = stype_encoder_dict_3
     elif args.add_img_emb:
         print("adding img embedding")
         emb_df = pd.read_pickle(args.img_emb_path)
@@ -360,14 +384,8 @@ def train(args):
                      how="left")
         raw_df = raw_df[dense_features + cate + cate_multi + time_col + img_embedding_col + [target]]
         col_to_stype.update({d: stype.embedding for d in img_embedding_col})
-        stype_encoder_dict = stype_encoder_dict_3
     else:
         raw_df = raw_df[dense_features + cate + cate_multi + time_col + [target]]
-        stype_encoder_dict = stype_encoder_dict_2
-    
-
-    for col in cate_multi:
-        raw_df[col] = raw_df[col].apply(lambda d: d if isinstance(d, list) else [])
     
     dataset = Dataset(
         raw_df, 
@@ -437,6 +455,11 @@ def train(args):
     n_batches = (len(train_dataset) + (args.batch_size - 1)) // args.batch_size
 
     test_folder = os.path.join(args.model_folder, args.test_name)
+    with open(os.path.join(test_folder, 'col_to_stype.pkl'), 'wb') as fp:
+        pickle.dump(col_to_stype, fp)
+        print('col_to_stype saved successfully to file')
+
+
     log_path = os.path.join(test_folder, "log.txt")
     if os.path.exists(log_path):
         open(log_path, 'w').close()
@@ -514,9 +537,7 @@ if __name__ == "__main__":
         config_file = args.config_file
         load_argparse(args, args.config_file)
         ## Make sure config name and test name are consistent
-        if args.config_file != config_file: 
-            args.config_file = config_file
-            args.test_name = config_file.split("/")[-1].replace(".cfg", "")
-            save_argparse(args, config_file)
+        args.config_file = config_file
+        save_argparse(args, config_file)
     print(args)
     train(args)

@@ -17,6 +17,13 @@ from torch_frame.nn.encoder import (
 )
 
 
+
+stype_encoder_dict_1 = {
+    stype.categorical: EmbeddingEncoder(),
+    stype.numerical: LinearEncoder(),
+    stype.timestamp: TimestampEncoder()
+}
+
 stype_encoder_dict_2 = {
     stype.categorical: EmbeddingEncoder(),
     stype.numerical: LinearEncoder(),
