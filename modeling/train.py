@@ -16,7 +16,7 @@ import torch_frame
 from torch_frame.data import Dataset
 from torch_frame.data import DataLoader
 from torch_frame import TensorFrame, stype
-from torch_frame.nn.models.ft_transformer import FTTransformer
+# from torch_frame.nn.models.ft_transformer import FTTransformer
 from torch_frame.nn.encoder import (
     EmbeddingEncoder,
     LinearEncoder,
@@ -26,8 +26,8 @@ from torch_frame.nn.encoder import (
     TimestampEncoder,
 )
 
-from model import TabTransformer, stype_encoder_dict_2, stype_encoder_dict_3
-from utils import cosine_scheduler
+from model import TabTransformer, FTTransformer, TabTransformer_v2, stype_encoder_dict_2, stype_encoder_dict_3
+from utils import cosine_scheduler, EarlyStopper
 
 
 
@@ -100,11 +100,32 @@ def get_args_parser():
     )
 
     parser.add_argument(
-         "--data_path",
-        default="data/property_structured.pkl",
+         "--train_data_path",
+        default="data/property_structured_12162024_train.pkl",
         type=str,
         help="""The path to the Raw Table in Pickle Format""",
     )
+    
+    parser.add_argument(
+        "--target_clip_min",
+        default=0,
+        type=int,
+        help="""num of epochs""",
+    )
+    parser.add_argument(
+        "--target_clip_max",
+        default=1e7,
+        type=int,
+        help="""num of epochs""",
+    )
+
+    parser.add_argument(
+         "--val_data_path",
+        default="data/property_structured_12162024_val.pkl",
+        type=str,
+        help="""The path to the Raw Table in Pickle Format""",
+    )
+
     parser.add_argument(
          "--text_emb_path",
         default="data/property_structured_multiclass_desc_text_emb.pkl",
@@ -155,6 +176,9 @@ def get_args_parser():
                 "school_org"])
     parser.add_argument('--time_col', nargs='+', 
                         default=["date"])
+    parser.add_argument('--emb_cols', nargs='+', 
+                        default=["general_desc_roberta_mean_features", "img_emb"])
+
     parser.add_argument("--data_v2", 
                         action="store_true", 
                         help="use data prep version 2")
@@ -309,6 +333,7 @@ def train(args):
     cate = args.cate
     time_col = args.time_col
     cate_multi = args.cate_multi
+    emb_cols = args.emb_cols
     stype_encoder_dict = {}
     if len(dense_features) > 0: 
         stype_encoder_dict.update({stype.numerical: LinearEncoder()})
@@ -322,33 +347,36 @@ def train(args):
     if len(cate_multi) > 0:
         stype_encoder_dict.update({stype.multicategorical: MultiCategoricalEmbeddingEncoder()})
 
-    if args.add_text_emb or args.add_img_emb:
+    if len(emb_cols) > 0:
         stype_encoder_dict.update({stype.embedding: LinearEmbeddingEncoder()})
-
-    # complicated logic to handle text embedding test, the mean feature is found to be the best
-    if args.text_emb_mean is True:
-        text_embedding_col = ["general_desc_roberta_mean_features"]
-        if args.use_pool_text_emb:
-            text_embedding_col = ["general_desc_roberta_mean_features", "pool_desc_roberta_mean_features"]
-    else: 
-        text_embedding_col = ["general_desc_roberta_cls_features"]
-        if args.use_pool_text_emb:
-            text_embedding_col = ["general_desc_roberta_cls_features", "pool_desc_roberta_cls_features"]
     
-    img_embedding_col = ["img_emb"]
-    raw_df = pd.read_pickle(args.data_path).reset_index(drop=True)
-    raw_df["date"] = raw_df["date"].apply(lambda x: x.replace("_", "-"))
-    # raw_df["date"] = pd.to_datetime(raw_df["date"])
+    train_df = pd.read_pickle(args.train_data_path)
+    train_df = train_df[train_df[target].apply(lambda x: 
+                                               args.target_clip_min < x < args.target_clip_max)]\
+                                                .reset_index(drop=True)
+    val_df = pd.read_pickle(args.val_data_path).reset_index(drop=True)
+    val_df = val_df[val_df[target].apply(lambda x: 
+                                               args.target_clip_min < x < args.target_clip_max)]\
+                                                .reset_index(drop=True)
+    train_df["date"] = train_df["date"].apply(lambda x: x.replace("_", "-"))
+    val_df["date"] = val_df["date"].apply(lambda x: x.replace("_", "-"))
+    # train_df["date"] = pd.to_datetime(train_df["date"])
     if args.data_v2: 
         print("adding additional features")
-        raw_df["Year Built"] = raw_df.apply(lambda x: int(x["date"].split("-")[0]) - x["Year Built"] 
+        train_df["Year Built"] = train_df.apply(lambda x: int(x["date"].split("-")[0]) - x["Year Built"] 
                                             if x["date"] is not None and x["Year Built"] is not None else None,
                                             axis=1)
+        val_df["Year Built"] = val_df.apply(lambda x: int(x["date"].split("-")[0]) - x["Year Built"]
+                                            if x["date"] is not None and x["Year Built"] is not None else None,
+                                            axis=1)
+
     for feat in dense_features:
-        raw_df[feat] = raw_df[feat].fillna(raw_df[feat].mean())
+        train_df[feat] = train_df[feat].fillna(train_df[feat].mean())
+        val_df[feat] = val_df[feat].fillna(train_df[feat].mean())
 
     for col in cate_multi:
-        raw_df[col] = raw_df[col].apply(lambda d: d if isinstance(d, list) else [])
+        train_df[col] = train_df[col].apply(lambda d: d if isinstance(d, list) else [])
+        val_df[col] = val_df[col].apply(lambda d: d if isinstance(d, list) else [])
 
     col_to_stype = {}
     col_to_stype.update({d: stype.numerical for d in dense_features})
@@ -356,47 +384,23 @@ def train(args):
     col_to_stype.update({target: stype.numerical})
     col_to_stype.update({d: stype.categorical for d in cate})
     col_to_stype.update({d: stype.multicategorical for d in cate_multi})
-    if args.add_text_emb and args.add_img_emb:
-        text_emb_df = pd.read_pickle(args.text_emb_path)
-        raw_df = raw_df.join(text_emb_df.set_index("address_key")[text_embedding_col], 
-                     on="address_key", 
-                     how="left")
-        img_emb_df = pd.read_pickle(args.img_emb_path)
-        raw_df = raw_df.join(img_emb_df.set_index("address_key")[["img_emb"]], 
-                     on="address_key", 
-                     how="left")
-        raw_df = raw_df[dense_features + cate + cate_multi + time_col + text_embedding_col + img_embedding_col + [target]]
-        col_to_stype.update({d: stype.embedding for d in img_embedding_col + text_embedding_col})
-        
-    elif args.add_text_emb:
-        print("adding text embedding")
-        emb_df = pd.read_pickle(args.text_emb_path)
-        raw_df = raw_df.join(emb_df.set_index("address_key")[text_embedding_col], 
-                     on="address_key", 
-                     how="left")
-        raw_df = raw_df[dense_features + cate + cate_multi + time_col + text_embedding_col + [target]]
-        col_to_stype.update({d: stype.embedding for d in text_embedding_col})
-    elif args.add_img_emb:
-        print("adding img embedding")
-        emb_df = pd.read_pickle(args.img_emb_path)
-        raw_df = raw_df.join(emb_df.set_index("address_key")[["img_emb"]], 
-                     on="address_key", 
-                     how="left")
-        raw_df = raw_df[dense_features + cate + cate_multi + time_col + img_embedding_col + [target]]
-        col_to_stype.update({d: stype.embedding for d in img_embedding_col})
-    else:
-        raw_df = raw_df[dense_features + cate + cate_multi + time_col + [target]]
-    
-    dataset = Dataset(
-        raw_df, 
+    col_to_stype.update({d: stype.embedding for d in emb_cols})
+   
+    train_df = train_df[dense_features + cate + cate_multi + time_col + emb_cols + [target]]
+    val_df = val_df[dense_features + cate + cate_multi + time_col + emb_cols + [target]]
+    train_dataset = Dataset(
+        train_df, 
         col_to_stype=col_to_stype,
         target_col="price"
     )
-    dataset.materialize(path=args.cache_path)
+    train_dataset.materialize(path=args.cache_path)
+    val_dataset = Dataset(
+        val_df, 
+        col_to_stype=col_to_stype,
+        target_col="price"
+    )
+    val_dataset.materialize(col_stats=train_dataset.col_stats)
     torch.manual_seed(args.torch_seed)
-    dataset.shuffle()
-    train_dataset, val_dataset = dataset[:0.8], dataset[0.80:]
-
     train_loader = DataLoader(train_dataset.tensor_frame, 
                               batch_size=args.batch_size,
                               shuffle=True)
@@ -417,11 +421,21 @@ def train(args):
             col_names_dict=train_dataset.tensor_frame.col_names_dict,
             stype_encoder_dict=stype_encoder_dict, 
         ).to(device)
-    # Bug, this model doesn't converge in current implementation 
+    elif args.arch == "TabTransformer_v2":
+        model = TabTransformer_v2(
+            channels=args.tabformer_channels,
+            num_layers=args.tabformer_num_layers,
+            num_heads=args.tabformer_num_heads,
+            col_stats=train_dataset.col_stats,
+            col_names_dict=train_dataset.tensor_frame.col_names_dict,
+            stype_encoder_dict=stype_encoder_dict, 
+        ).to(device)
+    # Bug, this model doesn't converge in current implementation or gradient blow up 
     elif args.arch == "FTTransformer": 
         model = FTTransformer(
             channels=args.ftformer_channels,
             num_layers=args.ftformer_num_layers,
+            num_heads=args.ftformer_num_heads,
             out_channels=1,
             col_stats=train_dataset.col_stats,
             col_names_dict=train_dataset.tensor_frame.col_names_dict,
@@ -444,6 +458,8 @@ def train(args):
 
     if args.optimizer == "Adam":
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr) 
+    if args.optimizer == "AdamW":
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr) 
     else: 
         optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
@@ -464,7 +480,8 @@ def train(args):
     if os.path.exists(log_path):
         open(log_path, 'w').close()
 
-    
+    early_stopper = EarlyStopper(patience=5, min_delta=10)
+
     for epoch in range(args.num_epoch):
         train_loss = train_one_epoch(model, 
                                      optimizer, 
@@ -474,10 +491,10 @@ def train(args):
                                      n_batches, 
                                      lr_schedule, 
                                      args)
-        if epoch < args.num_epoch - 1:
-            val_error = eval_model(model, val_loader, epoch, args)
-            save_log(log_path, {"train_loss": train_loss, "val_error": val_error, "epoch": epoch})
-        else:
+        val_error = eval_model(model, val_loader, epoch, args)
+        save_log(log_path, {"train_loss": train_loss, "val_error": val_error, "epoch": epoch})
+        stop_early = early_stopper.early_stop(val_error)
+        if epoch == args.num_epoch - 1 or stop_early:
             val_error, predicts, true_price = eval_model(model, val_loader, epoch, args, return_pred=True)
             save_log(log_path, {"train_loss": train_loss, "val_error": val_error, "epoch": epoch})
             mean_stat = binned_statistic(true_price, 
@@ -495,6 +512,7 @@ def train(args):
                                 "mean":  ["%0.2e"%(_) for _ in mean_stat.statistic],  
                                 # "bin_number": ["%i"%(_) for _ in mean_stat.binnumber]
                                 })
+            break 
         if epoch > 0 and epoch % args.checkpoint_freq == 0:
             checkpoint_path = os.path.join(test_folder, "model_epoch_%03d.pth"%epoch)
             state_dict_cpu = {k: v.cpu() for k, v in model.state_dict().items()}
